@@ -78,6 +78,7 @@ select {
 
 button,
 .preset-name,
+.preset-select,
 .color-control input,
 .range-control input[type='number'],
 .number-control input,
@@ -228,17 +229,19 @@ button:disabled {
   color: var(--muted);
 }
 
-.preset-grid,
 .quick-sizes {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
-.preset-grid button,
 .quick-sizes button {
   min-width: 0;
   font-family: var(--mono);
+}
+
+.preset-select-control {
+  display: block;
 }
 
 .color-control,
@@ -267,6 +270,7 @@ button:disabled {
 
 .color-control input[type='text'],
 .preset-name,
+.preset-select,
 .range-control input[type='number'],
 .number-control input,
 .select-control select {
@@ -282,6 +286,7 @@ button:disabled {
   grid-template-columns: minmax(112px, 1fr) minmax(0, 176px);
 }
 
+.preset-select,
 .select-control select {
   appearance: none;
   background-image:
@@ -292,6 +297,10 @@ button:disabled {
     calc(100% - 11px) 15px;
   background-size: 5px 5px;
   background-repeat: no-repeat;
+}
+
+.preset-select {
+  font-family: var(--mono);
 }
 
 .range-control {

@@ -86,12 +86,9 @@ const defaultSettings: DitherSettings = {
   exportHeight: 1000,
 }
 
-const builtInPresets = [
-  { name: 'Default', settings: imageDitheringPresets[0]?.params },
-  { name: 'Noise', settings: imageDitheringPresets[1]?.params },
-  { name: 'Retro', settings: imageDitheringPresets[2]?.params },
-  { name: 'Natural', settings: imageDitheringPresets[3]?.params },
-  { name: 'Superdraft', settings: defaultSettings },
+const pinnedPresets = [
+  { id: 'pinned-natural', name: 'Natural', settings: imageDitheringPresets[3]?.params },
+  { id: 'pinned-superdraft', name: 'Superdraft', settings: defaultSettings },
 ].filter((preset) => preset.settings)
 
 function loadSettings(): DitherSettings {
@@ -185,6 +182,7 @@ function App() {
   const [settings, setSettings] = useState<DitherSettings>(loadSettings)
   const [savedPresets, setSavedPresets] = useState<SavedPreset[]>(loadSavedPresets)
   const [presetName, setPresetName] = useState('')
+  const [selectedPresetId, setSelectedPresetId] = useState('')
   const defaultImageUrl = `${import.meta.env.BASE_URL}sample-artboard.svg`
   const [imageUrl, setImageUrl] = useState(defaultImageUrl)
   const [adjustedImageUrl, setAdjustedImageUrl] = useState('')
@@ -203,6 +201,16 @@ function App() {
 
   const shaderSettings = useMemo(() => coerceSettings(settings), [settings])
   const shaderImageUrl = adjustedImageUrl || imageUrl
+  const savedPresetOptions = useMemo(
+    () =>
+      savedPresets.map((preset) => ({
+        id: `saved-${preset.id}`,
+        name: preset.name,
+        settings: preset.settings,
+      })),
+    [savedPresets],
+  )
+  const presetOptions = useMemo(() => [...pinnedPresets, ...savedPresetOptions], [savedPresetOptions])
 
   useEffect(() => {
     return () => {
@@ -268,7 +276,7 @@ function App() {
     setSettings((current) => ({ ...current, [key]: value }))
   }
 
-  function applyPreset(preset: Partial<DitherSettings>) {
+  function applyPreset(preset: Partial<DitherSettings>, name = 'Preset') {
     setSettings((current) =>
       coerceSettings({
         ...current,
@@ -277,7 +285,14 @@ function App() {
         exportHeight: current.exportHeight,
       }),
     )
-    setStatus('Preset applied')
+    setStatus(`${name} applied`)
+  }
+
+  function applyPresetById(id: string) {
+    const preset = presetOptions.find((option) => option.id === id)
+    setSelectedPresetId('')
+    if (!preset) return
+    applyPreset(preset.settings ?? {}, preset.name)
   }
 
   function resetSettings() {
@@ -519,13 +534,35 @@ function App() {
             <h2>Presets</h2>
             <SlidersHorizontal size={17} />
           </div>
-          <div className="preset-grid">
-            {builtInPresets.map((preset) => (
-              <button key={preset.name} type="button" onClick={() => applyPreset(preset.settings ?? {})}>
-                {preset.name}
-              </button>
-            ))}
-          </div>
+          <label className="preset-select-control">
+            <span className="sr-only">Preset</span>
+            <select
+              className="preset-select"
+              value={selectedPresetId}
+              aria-label="Preset"
+              onChange={(event) => applyPresetById(event.currentTarget.value)}
+            >
+              <option value="" disabled>
+                Choose preset
+              </option>
+              <optgroup label="Pinned">
+                {pinnedPresets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name}
+                  </option>
+                ))}
+              </optgroup>
+              {savedPresetOptions.length > 0 ? (
+                <optgroup label="Saved">
+                  {savedPresetOptions.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
+            </select>
+          </label>
         </section>
 
         <section className="control-section">
@@ -722,7 +759,7 @@ function App() {
             ) : (
               savedPresets.map((preset) => (
                 <div key={preset.id} className="saved-row">
-                  <button type="button" onClick={() => applyPreset(preset.settings)}>
+                  <button type="button" onClick={() => applyPreset(preset.settings, preset.name)}>
                     <span>{preset.name}</span>
                     <span className="swatches">
                       <i style={{ background: preset.settings.colorBack }} />
