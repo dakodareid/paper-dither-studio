@@ -51,12 +51,20 @@ type SavedPreset = {
   createdAt: number
 }
 
+type ImageSize = {
+  width: number
+  height: number
+}
+
 type NumericSettingKey = {
   [Key in keyof DitherSettings]: DitherSettings[Key] extends number ? Key : never
 }[keyof DitherSettings]
 
 const SETTINGS_KEY = 'paper-dither-studio.settings.v1'
 const PRESETS_KEY = 'paper-dither-studio.presets.v1'
+const MIN_EXPORT_SIZE = 320
+const MAX_EXPORT_SIZE = 6000
+const defaultImageSize: ImageSize = { width: 1600, height: 1000 }
 
 const defaultSettings: DitherSettings = {
   colorBack: '#130f0b',
@@ -82,8 +90,8 @@ const defaultSettings: DitherSettings = {
   fit: 'contain',
   worldWidth: 0,
   worldHeight: 0,
-  exportWidth: 1600,
-  exportHeight: 1000,
+  exportWidth: defaultImageSize.width,
+  exportHeight: defaultImageSize.height,
 }
 
 const pinnedPresets = [
@@ -152,8 +160,8 @@ function coerceSettings(value: Partial<DitherSettings>): DitherSettings {
     fit: ['contain', 'cover', 'none'].includes(next.fit) ? next.fit : defaultSettings.fit,
     worldWidth: clampNumber(next.worldWidth, 0, 8000, defaultSettings.worldWidth),
     worldHeight: clampNumber(next.worldHeight, 0, 8000, defaultSettings.worldHeight),
-    exportWidth: Math.round(clampNumber(next.exportWidth, 320, 6000, defaultSettings.exportWidth)),
-    exportHeight: Math.round(clampNumber(next.exportHeight, 320, 6000, defaultSettings.exportHeight)),
+    exportWidth: Math.round(clampNumber(next.exportWidth, MIN_EXPORT_SIZE, MAX_EXPORT_SIZE, defaultSettings.exportWidth)),
+    exportHeight: Math.round(clampNumber(next.exportHeight, MIN_EXPORT_SIZE, MAX_EXPORT_SIZE, defaultSettings.exportHeight)),
   }
 }
 
@@ -187,6 +195,7 @@ function App() {
   const [imageUrl, setImageUrl] = useState(defaultImageUrl)
   const [adjustedImageUrl, setAdjustedImageUrl] = useState('')
   const [imageName, setImageName] = useState('sample-artboard')
+  const [imageSize, setImageSize] = useState<ImageSize>(defaultImageSize)
   const [dropActive, setDropActive] = useState(false)
   const [status, setStatus] = useState('Settings saved in this browser')
   const [isExporting, setIsExporting] = useState(false)
@@ -318,6 +327,21 @@ function App() {
     setStatus('Image adjustments reset')
   }
 
+  function matchImageAspectRatio() {
+    const nextSize = getOutputSizeForImageRatio(
+      imageSize,
+      shaderSettings.exportWidth,
+      shaderSettings.exportHeight,
+    )
+
+    setSettings((current) => ({
+      ...current,
+      exportWidth: nextSize.width,
+      exportHeight: nextSize.height,
+    }))
+    setStatus(`Matched image ratio (${imageSize.width} x ${imageSize.height})`)
+  }
+
   async function handleFile(file: File | undefined) {
     if (!file || !file.type.startsWith('image/')) {
       setStatus('Choose an image file')
@@ -331,7 +355,7 @@ function App() {
     setStatus('Checking image')
 
     try {
-      await validateImageUrl(nextUrl)
+      const nextImageSize = await validateImageUrl(nextUrl)
       if (uploadRequestRef.current !== requestId) {
         URL.revokeObjectURL(nextUrl)
         return
@@ -341,6 +365,7 @@ function App() {
       uploadedImageUrlRef.current = nextUrl
       setImageUrl(nextUrl)
       setImageName(fileStem(file.name) || 'dither-export')
+      setImageSize(nextImageSize)
       setStatus(file.name)
     } catch {
       URL.revokeObjectURL(nextUrl)
@@ -369,6 +394,7 @@ function App() {
     }
     setAdjustedImageUrl('')
     setImageName('sample-artboard')
+    setImageSize(defaultImageSize)
     setStatus('Sample image restored')
   }
 
@@ -724,6 +750,9 @@ function App() {
             />
           </div>
           <div className="quick-sizes">
+            <button type="button" className="wide-button" onClick={matchImageAspectRatio}>
+              Image ratio
+            </button>
             <button type="button" onClick={() => setSettings((current) => ({ ...current, exportWidth: 1600, exportHeight: 1000 }))}>
               16:10
             </button>
@@ -956,12 +985,50 @@ async function waitForExportCanvas(container: HTMLDivElement, width: number, hei
   throw new Error('Timed out waiting for export canvas')
 }
 
+function getOutputSizeForImageRatio(imageSize: ImageSize, currentWidth: number, currentHeight: number) {
+  const ratio = imageSize.width / imageSize.height
+  if (!Number.isFinite(ratio) || ratio <= 0) {
+    return {
+      width: Math.round(clampNumber(currentWidth, MIN_EXPORT_SIZE, MAX_EXPORT_SIZE, defaultSettings.exportWidth)),
+      height: Math.round(clampNumber(currentHeight, MIN_EXPORT_SIZE, MAX_EXPORT_SIZE, defaultSettings.exportHeight)),
+    }
+  }
+
+  let width = clampNumber(currentWidth, MIN_EXPORT_SIZE, MAX_EXPORT_SIZE, defaultSettings.exportWidth)
+  let height = width / ratio
+
+  if (height < MIN_EXPORT_SIZE) {
+    height = MIN_EXPORT_SIZE
+    width = height * ratio
+  }
+
+  if (height > MAX_EXPORT_SIZE) {
+    height = MAX_EXPORT_SIZE
+    width = height * ratio
+  }
+
+  if (width < MIN_EXPORT_SIZE) {
+    width = MIN_EXPORT_SIZE
+    height = width / ratio
+  }
+
+  if (width > MAX_EXPORT_SIZE) {
+    width = MAX_EXPORT_SIZE
+    height = width / ratio
+  }
+
+  return {
+    width: Math.round(clampNumber(width, MIN_EXPORT_SIZE, MAX_EXPORT_SIZE, defaultSettings.exportWidth)),
+    height: Math.round(clampNumber(height, MIN_EXPORT_SIZE, MAX_EXPORT_SIZE, defaultSettings.exportHeight)),
+  }
+}
+
 function validateImageUrl(url: string) {
-  return new Promise<void>((resolve, reject) => {
+  return new Promise<ImageSize>((resolve, reject) => {
     const image = new Image()
     image.onload = () => {
       if (image.naturalWidth > 0 && image.naturalHeight > 0) {
-        resolve()
+        resolve({ width: image.naturalWidth, height: image.naturalHeight })
       } else {
         reject(new Error('Image has no dimensions'))
       }

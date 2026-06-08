@@ -240,6 +240,10 @@ button:disabled {
   font-family: var(--mono);
 }
 
+.quick-sizes .wide-button {
+  grid-column: 1 / -1;
+}
+
 .preset-select-control {
   display: block;
 }
