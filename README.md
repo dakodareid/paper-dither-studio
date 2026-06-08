@@ -28,11 +28,13 @@ npm run build
 
 The repo deploys to GitHub Pages from `main` through `.github/workflows/deploy.yml`.
 
-The production URL is:
+The current live URL is:
 
 ```text
-https://superdraft.github.io/paper-dither-studio/
+https://dakodareid.github.io/paper-dither-studio/
 ```
+
+The app can be transferred to `superdraft/paper-dither-studio` without changing the route base because the Vite base path is `/paper-dither-studio/`.
 
 ## Attribution
 

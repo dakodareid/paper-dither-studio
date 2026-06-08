@@ -173,9 +173,11 @@ function App() {
   const [dropActive, setDropActive] = useState(false)
   const [status, setStatus] = useState('Settings saved in this browser')
   const [isExporting, setIsExporting] = useState(false)
+  const [isImageLoading, setIsImageLoading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const exportRef = useRef<HTMLDivElement>(null)
   const uploadedImageUrlRef = useRef<string | null>(null)
+  const uploadRequestRef = useRef(0)
 
   const shaderSettings = useMemo(() => coerceSettings(settings), [settings])
 
@@ -218,26 +220,46 @@ function App() {
     setStatus('Superdraft palette restored')
   }
 
-  function handleFile(file: File | undefined) {
+  async function handleFile(file: File | undefined) {
     if (!file || !file.type.startsWith('image/')) {
       setStatus('Choose an image file')
       return
     }
 
-    if (uploadedImageUrlRef.current) URL.revokeObjectURL(uploadedImageUrlRef.current)
+    const requestId = uploadRequestRef.current + 1
+    uploadRequestRef.current = requestId
     const nextUrl = URL.createObjectURL(file)
-    uploadedImageUrlRef.current = nextUrl
-    setImageUrl(nextUrl)
-    setImageName(fileStem(file.name) || 'dither-export')
-    setStatus(file.name)
+    setIsImageLoading(true)
+    setStatus('Checking image')
+
+    try {
+      await validateImageUrl(nextUrl)
+      if (uploadRequestRef.current !== requestId) {
+        URL.revokeObjectURL(nextUrl)
+        return
+      }
+
+      if (uploadedImageUrlRef.current) URL.revokeObjectURL(uploadedImageUrlRef.current)
+      uploadedImageUrlRef.current = nextUrl
+      setImageUrl(nextUrl)
+      setImageName(fileStem(file.name) || 'dither-export')
+      setStatus(file.name)
+    } catch {
+      URL.revokeObjectURL(nextUrl)
+      setStatus('Image could not be loaded')
+    } finally {
+      if (uploadRequestRef.current === requestId) setIsImageLoading(false)
+    }
   }
 
   function handleFileInput(event: ChangeEvent<HTMLInputElement>) {
-    handleFile(event.currentTarget.files?.[0])
+    void handleFile(event.currentTarget.files?.[0])
     event.currentTarget.value = ''
   }
 
   function resetImage() {
+    uploadRequestRef.current += 1
+    setIsImageLoading(false)
     if (uploadedImageUrlRef.current) {
       URL.revokeObjectURL(uploadedImageUrlRef.current)
       uploadedImageUrlRef.current = null
@@ -277,13 +299,17 @@ function App() {
   }
 
   async function downloadImage() {
-    if (!exportRef.current) return
+    if (!exportRef.current || isImageLoading) return
 
     setIsExporting(true)
     setStatus('Rendering export')
 
     try {
-      const canvas = await waitForExportCanvas(exportRef.current)
+      const canvas = await waitForExportCanvas(
+        exportRef.current,
+        shaderSettings.exportWidth,
+        shaderSettings.exportHeight,
+      )
       const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
       if (!blob) throw new Error('Canvas export failed')
 
@@ -304,6 +330,14 @@ function App() {
   }
 
   const artboardRatio = `${shaderSettings.exportWidth} / ${shaderSettings.exportHeight}`
+  const exportSignature = useMemo(
+    () =>
+      JSON.stringify({
+        imageUrl,
+        ...shaderSettings,
+      }),
+    [imageUrl, shaderSettings],
+  )
 
   return (
     <main className="app-shell">
@@ -321,7 +355,7 @@ function App() {
               <Upload size={17} />
               Upload
             </button>
-            <button type="button" className="primary" onClick={downloadImage} disabled={isExporting}>
+            <button type="button" className="primary" onClick={downloadImage} disabled={isExporting || isImageLoading}>
               <Download size={17} />
               {isExporting ? 'Rendering' : 'Save PNG'}
             </button>
@@ -338,7 +372,7 @@ function App() {
           onDrop={(event) => {
             event.preventDefault()
             setDropActive(false)
-            handleFile(event.dataTransfer.files?.[0])
+            void handleFile(event.dataTransfer.files?.[0])
           }}
         >
           <div className="artboard" style={{ aspectRatio: artboardRatio }}>
@@ -559,6 +593,7 @@ function App() {
         ref={exportRef}
         className="export-stage"
         aria-hidden="true"
+        data-export-signature={exportSignature}
         style={{
           width: `${shaderSettings.exportWidth}px`,
           height: `${shaderSettings.exportHeight}px`,
@@ -566,6 +601,7 @@ function App() {
       >
         {imageUrl ? (
           <ImageDithering
+            key={exportSignature}
             image={imageUrl}
             colorBack={shaderSettings.colorBack}
             colorFront={shaderSettings.colorFront}
@@ -716,12 +752,12 @@ function NumberControl({
   )
 }
 
-async function waitForExportCanvas(container: HTMLDivElement) {
+async function waitForExportCanvas(container: HTMLDivElement, width: number, height: number) {
   const deadline = performance.now() + 4000
 
   while (performance.now() < deadline) {
     const canvas = container.querySelector('canvas')
-    if (canvas && canvas.width > 0 && canvas.height > 0) {
+    if (canvas && canvas.width === width && canvas.height === height) {
       await nextFrame()
       await nextFrame()
       return canvas
@@ -730,6 +766,21 @@ async function waitForExportCanvas(container: HTMLDivElement) {
   }
 
   throw new Error('Timed out waiting for export canvas')
+}
+
+function validateImageUrl(url: string) {
+  return new Promise<void>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => {
+      if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+        resolve()
+      } else {
+        reject(new Error('Image has no dimensions'))
+      }
+    }
+    image.onerror = () => reject(new Error('Image failed to load'))
+    image.src = url
+  })
 }
 
 function nextFrame() {
