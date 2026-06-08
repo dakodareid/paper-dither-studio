@@ -22,6 +22,12 @@ type DitherSettings = {
   colorHighlight: string
   originalColors: boolean
   inverted: boolean
+  brightness: number
+  contrast: number
+  saturation: number
+  exposure: number
+  gamma: number
+  temperature: number
   type: DitherType
   size: number
   colorSteps: number
@@ -58,6 +64,12 @@ const defaultSettings: DitherSettings = {
   colorHighlight: '#eed5be',
   originalColors: false,
   inverted: false,
+  brightness: 0,
+  contrast: 0,
+  saturation: 0,
+  exposure: 0,
+  gamma: 1,
+  temperature: 0,
   type: '8x8',
   size: 1,
   colorSteps: 2,
@@ -125,6 +137,12 @@ function coerceSettings(value: Partial<DitherSettings>): DitherSettings {
     colorHighlight: safeHex(next.colorHighlight, defaultSettings.colorHighlight),
     originalColors: Boolean(next.originalColors),
     inverted: Boolean(next.inverted),
+    brightness: clampNumber(next.brightness, -100, 100, defaultSettings.brightness),
+    contrast: clampNumber(next.contrast, -100, 100, defaultSettings.contrast),
+    saturation: clampNumber(next.saturation, -100, 100, defaultSettings.saturation),
+    exposure: clampNumber(next.exposure, -2, 2, defaultSettings.exposure),
+    gamma: clampNumber(next.gamma, 0.25, 3, defaultSettings.gamma),
+    temperature: clampNumber(next.temperature, -100, 100, defaultSettings.temperature),
     type: ['random', '2x2', '4x4', '8x8'].includes(next.type) ? next.type : defaultSettings.type,
     size: clampNumber(next.size, 0.5, 20, defaultSettings.size),
     colorSteps: Math.round(clampNumber(next.colorSteps, 1, 7, defaultSettings.colorSteps)),
@@ -169,23 +187,70 @@ function App() {
   const [presetName, setPresetName] = useState('')
   const defaultImageUrl = `${import.meta.env.BASE_URL}sample-artboard.svg`
   const [imageUrl, setImageUrl] = useState(defaultImageUrl)
+  const [adjustedImageUrl, setAdjustedImageUrl] = useState('')
   const [imageName, setImageName] = useState('sample-artboard')
   const [dropActive, setDropActive] = useState(false)
   const [status, setStatus] = useState('Settings saved in this browser')
   const [isExporting, setIsExporting] = useState(false)
   const [isImageLoading, setIsImageLoading] = useState(false)
+  const [isImageAdjusting, setIsImageAdjusting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const exportRef = useRef<HTMLDivElement>(null)
   const uploadedImageUrlRef = useRef<string | null>(null)
+  const adjustedImageUrlRef = useRef<string | null>(null)
   const uploadRequestRef = useRef(0)
+  const adjustmentRequestRef = useRef(0)
 
   const shaderSettings = useMemo(() => coerceSettings(settings), [settings])
+  const shaderImageUrl = adjustedImageUrl || imageUrl
 
   useEffect(() => {
     return () => {
       if (uploadedImageUrlRef.current) URL.revokeObjectURL(uploadedImageUrlRef.current)
+      if (adjustedImageUrlRef.current) URL.revokeObjectURL(adjustedImageUrlRef.current)
     }
   }, [])
+
+  useEffect(() => {
+    const requestId = adjustmentRequestRef.current + 1
+    adjustmentRequestRef.current = requestId
+
+    if (!hasImageAdjustments(shaderSettings)) {
+      if (adjustedImageUrlRef.current) {
+        URL.revokeObjectURL(adjustedImageUrlRef.current)
+        adjustedImageUrlRef.current = null
+      }
+      queueMicrotask(() => {
+        setAdjustedImageUrl('')
+        setIsImageAdjusting(false)
+      })
+      return
+    }
+
+    queueMicrotask(() => {
+      if (adjustmentRequestRef.current === requestId) setIsImageAdjusting(true)
+    })
+    processImageAdjustments(imageUrl, shaderSettings)
+      .then((adjustedUrl) => {
+        if (adjustmentRequestRef.current !== requestId) {
+          URL.revokeObjectURL(adjustedUrl)
+          return
+        }
+
+        if (adjustedImageUrlRef.current) URL.revokeObjectURL(adjustedImageUrlRef.current)
+        adjustedImageUrlRef.current = adjustedUrl
+        setAdjustedImageUrl(adjustedUrl)
+      })
+      .catch(() => {
+        if (adjustmentRequestRef.current === requestId) {
+          setAdjustedImageUrl('')
+          setStatus('Image adjustment failed')
+        }
+      })
+      .finally(() => {
+        if (adjustmentRequestRef.current === requestId) setIsImageAdjusting(false)
+      })
+  }, [imageUrl, shaderSettings])
 
   useEffect(() => {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(shaderSettings))
@@ -218,6 +283,24 @@ function App() {
   function resetSettings() {
     setSettings(defaultSettings)
     setStatus('Superdraft palette restored')
+  }
+
+  function resetAdjustments() {
+    if (adjustedImageUrlRef.current) {
+      URL.revokeObjectURL(adjustedImageUrlRef.current)
+      adjustedImageUrlRef.current = null
+    }
+    setAdjustedImageUrl('')
+    setSettings((current) => ({
+      ...current,
+      brightness: defaultSettings.brightness,
+      contrast: defaultSettings.contrast,
+      saturation: defaultSettings.saturation,
+      exposure: defaultSettings.exposure,
+      gamma: defaultSettings.gamma,
+      temperature: defaultSettings.temperature,
+    }))
+    setStatus('Image adjustments reset')
   }
 
   async function handleFile(file: File | undefined) {
@@ -265,6 +348,11 @@ function App() {
       uploadedImageUrlRef.current = null
     }
     setImageUrl(defaultImageUrl)
+    if (adjustedImageUrlRef.current) {
+      URL.revokeObjectURL(adjustedImageUrlRef.current)
+      adjustedImageUrlRef.current = null
+    }
+    setAdjustedImageUrl('')
     setImageName('sample-artboard')
     setStatus('Sample image restored')
   }
@@ -299,7 +387,7 @@ function App() {
   }
 
   async function downloadImage() {
-    if (!exportRef.current || isImageLoading) return
+    if (!exportRef.current || isImageLoading || isImageAdjusting) return
 
     setIsExporting(true)
     setStatus('Rendering export')
@@ -333,10 +421,10 @@ function App() {
   const exportSignature = useMemo(
     () =>
       JSON.stringify({
-        imageUrl,
+        shaderImageUrl,
         ...shaderSettings,
       }),
-    [imageUrl, shaderSettings],
+    [shaderImageUrl, shaderSettings],
   )
 
   return (
@@ -355,9 +443,14 @@ function App() {
               <Upload size={17} />
               Upload
             </button>
-            <button type="button" className="primary" onClick={downloadImage} disabled={isExporting || isImageLoading}>
+            <button
+              type="button"
+              className="primary"
+              onClick={downloadImage}
+              disabled={isExporting || isImageLoading || isImageAdjusting}
+            >
               <Download size={17} />
-              {isExporting ? 'Rendering' : 'Save PNG'}
+              {isExporting ? 'Rendering' : isImageAdjusting ? 'Adjusting' : 'Save PNG'}
             </button>
           </div>
         </header>
@@ -378,7 +471,7 @@ function App() {
           <div className="artboard" style={{ aspectRatio: artboardRatio }}>
             {imageUrl ? (
               <ImageDithering
-                image={imageUrl}
+                image={shaderImageUrl}
                 colorBack={shaderSettings.colorBack}
                 colorFront={shaderSettings.colorFront}
                 colorHighlight={shaderSettings.colorHighlight}
@@ -466,6 +559,64 @@ function App() {
               onChange={(value) => updateSetting('inverted', value)}
             />
           </div>
+        </section>
+
+        <section className="control-section">
+          <div className="section-heading">
+            <h2>Adjust</h2>
+            <button type="button" className="ghost-button" onClick={resetAdjustments}>
+              <RotateCcw size={15} />
+              Reset
+            </button>
+          </div>
+          <RangeControl
+            label="brightness"
+            min={-100}
+            max={100}
+            step={1}
+            value={shaderSettings.brightness}
+            onChange={(value) => updateNumber('brightness', value)}
+          />
+          <RangeControl
+            label="contrast"
+            min={-100}
+            max={100}
+            step={1}
+            value={shaderSettings.contrast}
+            onChange={(value) => updateNumber('contrast', value)}
+          />
+          <RangeControl
+            label="saturation"
+            min={-100}
+            max={100}
+            step={1}
+            value={shaderSettings.saturation}
+            onChange={(value) => updateNumber('saturation', value)}
+          />
+          <RangeControl
+            label="exposure"
+            min={-2}
+            max={2}
+            step={0.05}
+            value={shaderSettings.exposure}
+            onChange={(value) => updateNumber('exposure', value)}
+          />
+          <RangeControl
+            label="gamma"
+            min={0.25}
+            max={3}
+            step={0.01}
+            value={shaderSettings.gamma}
+            onChange={(value) => updateNumber('gamma', value)}
+          />
+          <RangeControl
+            label="temperature"
+            min={-100}
+            max={100}
+            step={1}
+            value={shaderSettings.temperature}
+            onChange={(value) => updateNumber('temperature', value)}
+          />
         </section>
 
         <section className="control-section">
@@ -602,7 +753,7 @@ function App() {
         {imageUrl ? (
           <ImageDithering
             key={exportSignature}
-            image={imageUrl}
+            image={shaderImageUrl}
             colorBack={shaderSettings.colorBack}
             colorFront={shaderSettings.colorFront}
             colorHighlight={shaderSettings.colorHighlight}
@@ -781,6 +932,83 @@ function validateImageUrl(url: string) {
     image.onerror = () => reject(new Error('Image failed to load'))
     image.src = url
   })
+}
+
+function hasImageAdjustments(settings: DitherSettings) {
+  return (
+    settings.brightness !== defaultSettings.brightness ||
+    settings.contrast !== defaultSettings.contrast ||
+    settings.saturation !== defaultSettings.saturation ||
+    settings.exposure !== defaultSettings.exposure ||
+    settings.gamma !== defaultSettings.gamma ||
+    settings.temperature !== defaultSettings.temperature
+  )
+}
+
+async function processImageAdjustments(url: string, settings: DitherSettings) {
+  const image = await loadImage(url)
+  const canvas = document.createElement('canvas')
+  canvas.width = image.naturalWidth
+  canvas.height = image.naturalHeight
+
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) throw new Error('Canvas is not available')
+
+  context.drawImage(image, 0, 0)
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height)
+  applyImageAdjustments(imageData.data, settings)
+  context.putImageData(imageData, 0, 0)
+
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+  if (!blob) throw new Error('Adjusted image export failed')
+
+  return URL.createObjectURL(blob)
+}
+
+function loadImage(url: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('Image failed to load'))
+    image.src = url
+  })
+}
+
+function applyImageAdjustments(data: Uint8ClampedArray, settings: DitherSettings) {
+  const exposureFactor = 2 ** settings.exposure
+  const brightnessOffset = settings.brightness * 2.55
+  const contrastValue = settings.contrast * 2.55
+  const contrastFactor = (259 * (contrastValue + 255)) / (255 * (259 - contrastValue))
+  const saturationFactor = 1 + settings.saturation / 100
+  const temperatureOffset = settings.temperature * 0.8
+  const gammaInverse = 1 / settings.gamma
+
+  for (let index = 0; index < data.length; index += 4) {
+    let red = data[index] * exposureFactor
+    let green = data[index + 1] * exposureFactor
+    let blue = data[index + 2] * exposureFactor
+
+    red += brightnessOffset + temperatureOffset
+    green += brightnessOffset + Math.abs(temperatureOffset) * 0.08
+    blue += brightnessOffset - temperatureOffset
+
+    red = contrastFactor * (red - 128) + 128
+    green = contrastFactor * (green - 128) + 128
+    blue = contrastFactor * (blue - 128) + 128
+
+    const luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722
+    red = luminance + (red - luminance) * saturationFactor
+    green = luminance + (green - luminance) * saturationFactor
+    blue = luminance + (blue - luminance) * saturationFactor
+
+    data[index] = gammaCorrect(red, gammaInverse)
+    data[index + 1] = gammaCorrect(green, gammaInverse)
+    data[index + 2] = gammaCorrect(blue, gammaInverse)
+  }
+}
+
+function gammaCorrect(value: number, gammaInverse: number) {
+  return Math.round(255 * Math.min(1, Math.max(0, value / 255)) ** gammaInverse)
 }
 
 function nextFrame() {

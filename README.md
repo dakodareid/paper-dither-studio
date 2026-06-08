@@ -8,6 +8,7 @@ The app wraps Paper's `ImageDithering` shader from `@paper-design/shaders-react`
 - persistent current settings in `localStorage`
 - saved custom presets
 - original Paper presets plus a Superdraft palette
+- image adjustment controls for brightness, contrast, saturation, exposure, gamma, and temperature
 - all exposed image dithering, sizing, and frame controls
 - fixed-size PNG export
 
