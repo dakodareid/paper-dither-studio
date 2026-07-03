@@ -11,6 +11,19 @@ The app wraps Paper's `ImageDithering` shader from `@paper-design/shaders-react`
 - image adjustment controls for brightness, contrast, saturation, exposure, gamma, and temperature
 - all exposed image dithering, sizing, and frame controls
 - fixed-size PNG export
+- browser-local video upload, dithered playback, and silent video export
+
+## Video export
+
+Video export is assembled frame-by-frame in the browser as `.webm`, with timestamps based on the selected FPS. This avoids realtime canvas-recording drift where slow rendering can make the output play back too slowly.
+
+For MP4 delivery, convert the exported file locally:
+
+```bash
+ffmpeg -i dither-video.webm -c:v libx264 -pix_fmt yuv420p -movflags +faststart dither-video.mp4
+```
+
+The browser export is silent. If you need original audio merged back in, use the original uploaded video as a second ffmpeg input.
 
 ## Local development
 

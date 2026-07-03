@@ -1,20 +1,26 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { ImageDithering, imageDitheringPresets } from '@paper-design/shaders-react'
+import WebMWriter from 'webm-writer'
 import {
   Check,
+  CircleStop,
   Copy,
   Download,
   ImagePlus,
+  Pause,
+  Play,
   RotateCcw,
   Save,
   SlidersHorizontal,
   Trash2,
   Upload,
+  Video,
 } from 'lucide-react'
 import './App.css'
 
 type DitherType = 'random' | '2x2' | '4x4' | '8x8'
 type FitMode = 'contain' | 'cover' | 'none'
+type MediaKind = 'image' | 'video'
 
 type DitherSettings = {
   colorBack: string
@@ -42,6 +48,7 @@ type DitherSettings = {
   worldHeight: number
   exportWidth: number
   exportHeight: number
+  videoFps: number
 }
 
 type SavedPreset = {
@@ -56,6 +63,17 @@ type ImageSize = {
   height: number
 }
 
+type VideoMeta = ImageSize & {
+  duration: number
+}
+
+type VideoExportFormat = {
+  extension: 'webm'
+  label: 'WebM'
+}
+
+type ShaderImageSource = string | HTMLImageElement
+
 type NumericSettingKey = {
   [Key in keyof DitherSettings]: DitherSettings[Key] extends number ? Key : never
 }[keyof DitherSettings]
@@ -64,7 +82,11 @@ const SETTINGS_KEY = 'paper-dither-studio.settings.v1'
 const PRESETS_KEY = 'paper-dither-studio.presets.v1'
 const MIN_EXPORT_SIZE = 320
 const MAX_EXPORT_SIZE = 6000
+const MIN_VIDEO_FPS = 1
+const MAX_VIDEO_FPS = 60
+const HAVE_CURRENT_DATA = 2
 const defaultImageSize: ImageSize = { width: 1600, height: 1000 }
+const defaultVideoMeta: VideoMeta = { ...defaultImageSize, duration: 0 }
 
 const defaultSettings: DitherSettings = {
   colorBack: '#130f0b',
@@ -92,6 +114,7 @@ const defaultSettings: DitherSettings = {
   worldHeight: 0,
   exportWidth: defaultImageSize.width,
   exportHeight: defaultImageSize.height,
+  videoFps: 24,
 }
 
 const pinnedPresets = [
@@ -162,6 +185,7 @@ function coerceSettings(value: Partial<DitherSettings>): DitherSettings {
     worldHeight: clampNumber(next.worldHeight, 0, 8000, defaultSettings.worldHeight),
     exportWidth: Math.round(clampNumber(next.exportWidth, MIN_EXPORT_SIZE, MAX_EXPORT_SIZE, defaultSettings.exportWidth)),
     exportHeight: Math.round(clampNumber(next.exportHeight, MIN_EXPORT_SIZE, MAX_EXPORT_SIZE, defaultSettings.exportHeight)),
+    videoFps: Math.round(clampNumber(next.videoFps, MIN_VIDEO_FPS, MAX_VIDEO_FPS, defaultSettings.videoFps)),
   }
 }
 
@@ -186,30 +210,63 @@ function fileStem(name: string) {
     .slice(0, 48)
 }
 
+function getSupportedVideoFormat(): VideoExportFormat | null {
+  if (!canEncodeWebmFrames()) return null
+  return { extension: 'webm', label: 'WebM' }
+}
+
+function canEncodeWebmFrames() {
+  if (typeof HTMLCanvasElement === 'undefined') return false
+
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = 1
+    canvas.height = 1
+    return canvas.toDataURL('image/webp', 0.8).startsWith('data:image/webp')
+  } catch {
+    return false
+  }
+}
+
 function App() {
   const [settings, setSettings] = useState<DitherSettings>(loadSettings)
   const [savedPresets, setSavedPresets] = useState<SavedPreset[]>(loadSavedPresets)
   const [presetName, setPresetName] = useState('')
   const [selectedPresetId, setSelectedPresetId] = useState('')
   const defaultImageUrl = `${import.meta.env.BASE_URL}sample-artboard.svg`
-  const [imageUrl, setImageUrl] = useState(defaultImageUrl)
+  const [mediaKind, setMediaKind] = useState<MediaKind>('image')
+  const [imageUrl, setImageUrl] = useState<ShaderImageSource>(defaultImageUrl)
   const [adjustedImageUrl, setAdjustedImageUrl] = useState('')
   const [imageName, setImageName] = useState('sample-artboard')
   const [imageSize, setImageSize] = useState<ImageSize>(defaultImageSize)
+  const [videoUrl, setVideoUrl] = useState('')
+  const [videoMeta, setVideoMeta] = useState<VideoMeta>(defaultVideoMeta)
+  const [videoTime, setVideoTime] = useState(0)
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false)
+  const [shaderFrameId, setShaderFrameId] = useState(0)
   const [dropActive, setDropActive] = useState(false)
   const [status, setStatus] = useState('Settings saved in this browser')
   const [isExporting, setIsExporting] = useState(false)
+  const [isVideoExporting, setIsVideoExporting] = useState(false)
   const [isImageLoading, setIsImageLoading] = useState(false)
   const [isImageAdjusting, setIsImageAdjusting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const exportRef = useRef<HTMLDivElement>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
   const uploadedImageUrlRef = useRef<string | null>(null)
   const adjustedImageUrlRef = useRef<string | null>(null)
   const uploadRequestRef = useRef(0)
   const adjustmentRequestRef = useRef(0)
+  const shaderFrameIdRef = useRef(0)
+  const videoPreviewAbortRef = useRef(0)
+  const videoPreviewInFlightRef = useRef(false)
+  const videoExportAbortRef = useRef(false)
+  const shaderSettingsRef = useRef<DitherSettings>(coerceSettings(settings))
 
   const shaderSettings = useMemo(() => coerceSettings(settings), [settings])
-  const shaderImageUrl = adjustedImageUrl || imageUrl
+  const shaderImageSource: ShaderImageSource = adjustedImageUrl || imageUrl
+  const videoExportFormat = useMemo(() => getSupportedVideoFormat(), [])
+  const videoExportSupported = Boolean(videoExportFormat)
   const savedPresetOptions = useMemo(
     () =>
       savedPresets.map((preset) => ({
@@ -221,16 +278,62 @@ function App() {
   )
   const presetOptions = useMemo(() => [...pinnedPresets, ...savedPresetOptions], [savedPresetOptions])
 
+  const setShaderImage = useCallback((source: ShaderImageSource) => {
+    const nextFrameId = shaderFrameIdRef.current + 1
+    shaderFrameIdRef.current = nextFrameId
+    setImageUrl(source)
+    setShaderFrameId(nextFrameId)
+    return nextFrameId
+  }, [])
+
+  const captureVideoPreviewFrame = useCallback(
+    async (video = videoRef.current) => {
+      if (!video || videoPreviewInFlightRef.current || video.readyState < HAVE_CURRENT_DATA) {
+        return
+      }
+
+      videoPreviewInFlightRef.current = true
+      try {
+        const frame = await createVideoFrameImage(video, shaderSettingsRef.current)
+        setShaderImage(frame)
+        setVideoTime(video.currentTime)
+      } catch {
+        setStatus('Video frame could not be loaded')
+      } finally {
+        videoPreviewInFlightRef.current = false
+      }
+    },
+    [setShaderImage],
+  )
+
+  useEffect(() => {
+    shaderSettingsRef.current = shaderSettings
+  }, [shaderSettings])
+
   useEffect(() => {
     return () => {
       if (uploadedImageUrlRef.current) URL.revokeObjectURL(uploadedImageUrlRef.current)
       if (adjustedImageUrlRef.current) URL.revokeObjectURL(adjustedImageUrlRef.current)
+      videoPreviewAbortRef.current += 1
+      videoExportAbortRef.current = true
     }
   }, [])
 
   useEffect(() => {
     const requestId = adjustmentRequestRef.current + 1
     adjustmentRequestRef.current = requestId
+
+    if (mediaKind !== 'image' || typeof imageUrl !== 'string') {
+      if (adjustedImageUrlRef.current) {
+        URL.revokeObjectURL(adjustedImageUrlRef.current)
+        adjustedImageUrlRef.current = null
+      }
+      queueMicrotask(() => {
+        setAdjustedImageUrl('')
+        setIsImageAdjusting(false)
+      })
+      return
+    }
 
     if (!hasImageAdjustments(shaderSettings)) {
       if (adjustedImageUrlRef.current) {
@@ -267,7 +370,7 @@ function App() {
       .finally(() => {
         if (adjustmentRequestRef.current === requestId) setIsImageAdjusting(false)
       })
-  }, [imageUrl, shaderSettings])
+  }, [imageUrl, mediaKind, shaderSettings])
 
   useEffect(() => {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(shaderSettings))
@@ -276,6 +379,55 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(PRESETS_KEY, JSON.stringify(savedPresets))
   }, [savedPresets])
+
+  useEffect(() => {
+    if (mediaKind !== 'video' || !isVideoPlaying) return
+
+    const abortId = videoPreviewAbortRef.current + 1
+    videoPreviewAbortRef.current = abortId
+
+    const runPreview = async () => {
+      const video = videoRef.current
+      if (
+        !video ||
+        video.paused ||
+        video.ended ||
+        videoPreviewAbortRef.current !== abortId
+      ) {
+        setIsVideoPlaying(false)
+        return
+      }
+
+      await captureVideoPreviewFrame(video)
+
+      const frameDelay = 1000 / shaderSettingsRef.current.videoFps
+      window.setTimeout(() => {
+        void runPreview()
+      }, frameDelay)
+    }
+
+    void runPreview()
+
+    return () => {
+      videoPreviewAbortRef.current += 1
+    }
+  }, [captureVideoPreviewFrame, isVideoPlaying, mediaKind])
+
+  useEffect(() => {
+    if (mediaKind !== 'video' || isVideoPlaying || isVideoExporting) return
+    void captureVideoPreviewFrame()
+  }, [
+    captureVideoPreviewFrame,
+    isVideoExporting,
+    isVideoPlaying,
+    mediaKind,
+    shaderSettings.brightness,
+    shaderSettings.contrast,
+    shaderSettings.exposure,
+    shaderSettings.gamma,
+    shaderSettings.saturation,
+    shaderSettings.temperature,
+  ])
 
   function updateSetting<Key extends keyof DitherSettings>(key: Key, value: DitherSettings[Key]) {
     setSettings((current) => ({ ...current, [key]: value }))
@@ -339,12 +491,60 @@ function App() {
       exportWidth: nextSize.width,
       exportHeight: nextSize.height,
     }))
-    setStatus(`Matched image ratio (${imageSize.width} x ${imageSize.height})`)
+    setStatus(`Matched ${mediaKind} ratio (${imageSize.width} x ${imageSize.height})`)
+  }
+
+  function clearAdjustedImage() {
+    if (adjustedImageUrlRef.current) {
+      URL.revokeObjectURL(adjustedImageUrlRef.current)
+      adjustedImageUrlRef.current = null
+    }
+    setAdjustedImageUrl('')
+  }
+
+  async function toggleVideoPlayback() {
+    const video = videoRef.current
+    if (!video) return
+
+    if (isVideoPlaying) {
+      video.pause()
+      setIsVideoPlaying(false)
+      return
+    }
+
+    try {
+      video.muted = true
+      await video.play()
+      setIsVideoPlaying(true)
+    } catch {
+      setStatus('Video playback could not start')
+    }
+  }
+
+  async function scrubVideo(time: number) {
+    const video = videoRef.current
+    if (!video) return
+
+    const nextTime = clampNumber(time, 0, videoMeta.duration || 0, 0)
+    const wasPlaying = isVideoPlaying
+    video.pause()
+    setIsVideoPlaying(false)
+    setVideoTime(nextTime)
+    try {
+      await seekVideo(video, nextTime)
+      await captureVideoPreviewFrame(video)
+      if (wasPlaying) {
+        await video.play()
+        setIsVideoPlaying(true)
+      }
+    } catch {
+      setStatus('Video seek failed')
+    }
   }
 
   async function handleFile(file: File | undefined) {
-    if (!file || !file.type.startsWith('image/')) {
-      setStatus('Choose an image file')
+    if (!file || (!file.type.startsWith('image/') && !file.type.startsWith('video/'))) {
+      setStatus('Choose an image or video file')
       return
     }
 
@@ -352,24 +552,58 @@ function App() {
     uploadRequestRef.current = requestId
     const nextUrl = URL.createObjectURL(file)
     setIsImageLoading(true)
-    setStatus('Checking image')
+    setStatus(file.type.startsWith('video/') ? 'Checking video' : 'Checking image')
 
     try {
+      if (file.type.startsWith('video/')) {
+        const nextVideo = await validateVideoUrl(nextUrl, shaderSettingsRef.current)
+        if (uploadRequestRef.current !== requestId) {
+          URL.revokeObjectURL(nextUrl)
+          return
+        }
+
+        videoRef.current?.pause()
+        if (uploadedImageUrlRef.current) URL.revokeObjectURL(uploadedImageUrlRef.current)
+        uploadedImageUrlRef.current = nextUrl
+        clearAdjustedImage()
+        setMediaKind('video')
+        setVideoUrl(nextUrl)
+        setVideoMeta({
+          width: nextVideo.width,
+          height: nextVideo.height,
+          duration: nextVideo.duration,
+        })
+        setVideoTime(0)
+        setIsVideoPlaying(false)
+        setShaderImage(nextVideo.frame)
+        setImageName(fileStem(file.name) || 'dither-video')
+        setImageSize({ width: nextVideo.width, height: nextVideo.height })
+        setStatus(`${file.name} · ${formatDuration(nextVideo.duration)}`)
+        return
+      }
+
       const nextImageSize = await validateImageUrl(nextUrl)
       if (uploadRequestRef.current !== requestId) {
         URL.revokeObjectURL(nextUrl)
         return
       }
 
+      videoRef.current?.pause()
       if (uploadedImageUrlRef.current) URL.revokeObjectURL(uploadedImageUrlRef.current)
       uploadedImageUrlRef.current = nextUrl
-      setImageUrl(nextUrl)
+      clearAdjustedImage()
+      setMediaKind('image')
+      setVideoUrl('')
+      setVideoMeta(defaultVideoMeta)
+      setVideoTime(0)
+      setIsVideoPlaying(false)
+      setShaderImage(nextUrl)
       setImageName(fileStem(file.name) || 'dither-export')
       setImageSize(nextImageSize)
       setStatus(file.name)
     } catch {
       URL.revokeObjectURL(nextUrl)
-      setStatus('Image could not be loaded')
+      setStatus(file.type.startsWith('video/') ? 'Video could not be loaded' : 'Image could not be loaded')
     } finally {
       if (uploadRequestRef.current === requestId) setIsImageLoading(false)
     }
@@ -382,17 +616,22 @@ function App() {
 
   function resetImage() {
     uploadRequestRef.current += 1
+    videoPreviewAbortRef.current += 1
+    videoExportAbortRef.current = true
+    videoRef.current?.pause()
     setIsImageLoading(false)
+    setIsVideoExporting(false)
+    setIsVideoPlaying(false)
     if (uploadedImageUrlRef.current) {
       URL.revokeObjectURL(uploadedImageUrlRef.current)
       uploadedImageUrlRef.current = null
     }
-    setImageUrl(defaultImageUrl)
-    if (adjustedImageUrlRef.current) {
-      URL.revokeObjectURL(adjustedImageUrlRef.current)
-      adjustedImageUrlRef.current = null
-    }
-    setAdjustedImageUrl('')
+    clearAdjustedImage()
+    setMediaKind('image')
+    setVideoUrl('')
+    setVideoMeta(defaultVideoMeta)
+    setVideoTime(0)
+    setShaderImage(defaultImageUrl)
     setImageName('sample-artboard')
     setImageSize(defaultImageSize)
     setStatus('Sample image restored')
@@ -428,7 +667,7 @@ function App() {
   }
 
   async function downloadImage() {
-    if (!exportRef.current || isImageLoading || isImageAdjusting) return
+    if (!exportRef.current || isImageLoading || isImageAdjusting || isVideoExporting) return
 
     setIsExporting(true)
     setStatus('Rendering export')
@@ -458,14 +697,96 @@ function App() {
     }
   }
 
+  function cancelVideoExport() {
+    videoExportAbortRef.current = true
+    setStatus('Cancelling video export')
+  }
+
+  async function downloadVideo() {
+    if (!videoUrl || !exportRef.current || isImageLoading || isImageAdjusting || isVideoExporting) return
+
+    const exportFormat = getSupportedVideoFormat()
+    if (!exportFormat) {
+      setStatus('Video recording is not supported in this browser')
+      return
+    }
+
+    videoPreviewAbortRef.current += 1
+    videoExportAbortRef.current = false
+    videoRef.current?.pause()
+    setIsVideoPlaying(false)
+    setIsVideoExporting(true)
+    setStatus('Preparing video export')
+
+    try {
+      const exportVideo = await createVideoElement(videoUrl)
+      const fps = shaderSettings.videoFps
+      const frameCount = Math.max(1, Math.ceil(exportVideo.duration * fps))
+      const writer = new WebMWriter({
+        frameRate: fps,
+        quality: 0.95,
+      })
+
+      const canvas = await waitForExportCanvas(
+        exportRef.current,
+        shaderSettings.exportWidth,
+        shaderSettings.exportHeight,
+      )
+
+      for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+        if (videoExportAbortRef.current) break
+
+        const frameTime = Math.min(frameIndex / fps, Math.max(0, exportVideo.duration - 0.001))
+        await seekVideo(exportVideo, frameTime)
+        const frame = await createVideoFrameImage(exportVideo, shaderSettingsRef.current)
+        const frameId = setShaderImage(frame)
+        const exportCanvas = await waitForExportFrame(
+          exportRef.current,
+          frameId,
+          shaderSettings.exportWidth,
+          shaderSettings.exportHeight,
+        )
+
+        writer.addFrame(exportCanvas)
+        setVideoTime(frameTime)
+        setStatus(`Exporting ${exportFormat.label} ${frameIndex + 1} / ${frameCount}`)
+
+        if (exportCanvas !== canvas) {
+          throw new Error('Export canvas changed during recording')
+        }
+      }
+
+      const blob = await writer.complete()
+
+      if (videoExportAbortRef.current) {
+        setStatus('Video export cancelled')
+        return
+      }
+
+      if (!blob.size) throw new Error('Video export was empty')
+
+      downloadBlob(
+        blob,
+        `${fileStem(imageName) || 'dither-video'}-${shaderSettings.exportWidth}x${shaderSettings.exportHeight}-${fps}fps.${exportFormat.extension}`,
+      )
+      setStatus(`${exportFormat.label} saved`)
+    } catch {
+      setStatus(videoExportAbortRef.current ? 'Video export cancelled' : 'Video export failed')
+    } finally {
+      videoExportAbortRef.current = false
+      setIsVideoExporting(false)
+    }
+  }
+
   const artboardRatio = `${shaderSettings.exportWidth} / ${shaderSettings.exportHeight}`
   const exportSignature = useMemo(
     () =>
       JSON.stringify({
-        shaderImageUrl,
+        shaderFrameId,
+        shaderImage: typeof shaderImageSource === 'string' ? shaderImageSource : 'video-frame',
         ...shaderSettings,
       }),
-    [shaderImageUrl, shaderSettings],
+    [shaderFrameId, shaderImageSource, shaderSettings],
   )
 
   return (
@@ -486,13 +807,28 @@ function App() {
             </button>
             <button
               type="button"
-              className="primary"
+              className={mediaKind === 'image' ? 'primary' : undefined}
               onClick={downloadImage}
-              disabled={isExporting || isImageLoading || isImageAdjusting}
+              disabled={isExporting || isImageLoading || isImageAdjusting || isVideoExporting}
             >
               <Download size={17} />
               {isExporting ? 'Rendering' : isImageAdjusting ? 'Adjusting' : 'Save PNG'}
             </button>
+            {mediaKind === 'video' ? (
+              <button
+                type="button"
+                className="primary"
+                onClick={isVideoExporting ? cancelVideoExport : downloadVideo}
+                disabled={isImageLoading || isImageAdjusting || !videoExportSupported}
+              >
+                {isVideoExporting ? <CircleStop size={17} /> : <Video size={17} />}
+                {videoExportSupported
+                  ? isVideoExporting
+                    ? 'Cancel'
+                    : `Save ${videoExportFormat?.label ?? 'Video'}`
+                  : 'Video unsupported'}
+              </button>
+            ) : null}
           </div>
         </header>
 
@@ -512,7 +848,7 @@ function App() {
           <div className="artboard" style={{ aspectRatio: artboardRatio }}>
             {imageUrl ? (
               <ImageDithering
-                image={shaderImageUrl}
+                image={shaderImageSource}
                 colorBack={shaderSettings.colorBack}
                 colorFront={shaderSettings.colorFront}
                 colorHighlight={shaderSettings.colorHighlight}
@@ -537,9 +873,49 @@ function App() {
                 webGlContextAttributes={{ preserveDrawingBuffer: true }}
               />
             ) : null}
-            <div className="drop-hint">
-              <ImagePlus size={18} />
-              Drop image
+            {mediaKind === 'video' && videoUrl ? (
+              <div className="video-controls">
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={toggleVideoPlayback}
+                  aria-label={isVideoPlaying ? 'Pause video' : 'Play video'}
+                  disabled={isVideoExporting}
+                >
+                  {isVideoPlaying ? <Pause size={17} /> : <Play size={17} />}
+                </button>
+                <input
+                  type="range"
+                  min={0}
+                  max={videoMeta.duration || 0}
+                  step={1 / shaderSettings.videoFps}
+                  value={Math.min(videoTime, videoMeta.duration || 0)}
+                  onChange={(event) => void scrubVideo(Number(event.currentTarget.value))}
+                  disabled={isVideoExporting}
+                  aria-label="Video time"
+                />
+                <span>
+                  {formatDuration(videoTime)} / {formatDuration(videoMeta.duration)}
+                </span>
+              </div>
+            ) : null}
+            <video
+              ref={videoRef}
+              className="source-video"
+              src={videoUrl || undefined}
+              muted
+              playsInline
+              preload="auto"
+              onLoadedData={() => {
+                setVideoTime(videoRef.current?.currentTime ?? 0)
+                void captureVideoPreviewFrame()
+              }}
+              onTimeUpdate={(event) => setVideoTime(event.currentTarget.currentTime)}
+              onEnded={() => setIsVideoPlaying(false)}
+            />
+            <div className={`drop-hint ${mediaKind === 'video' ? 'is-video' : ''}`}>
+              {mediaKind === 'video' ? <Video size={18} /> : <ImagePlus size={18} />}
+              Drop image or video
             </div>
           </div>
         </div>
@@ -553,7 +929,7 @@ function App() {
       </section>
 
       <aside className="controls-panel" aria-label="Dither controls">
-        <input ref={fileInputRef} className="sr-only" type="file" accept="image/*" onChange={handleFileInput} />
+        <input ref={fileInputRef} className="sr-only" type="file" accept="image/*,video/*" onChange={handleFileInput} />
 
         <section className="control-section">
           <div className="section-heading">
@@ -749,9 +1125,20 @@ function App() {
               onChange={(value) => updateNumber('exportHeight', Math.round(value))}
             />
           </div>
+          {mediaKind === 'video' ? (
+            <div className="split-row">
+              <NumberControl
+                label="fps"
+                min={MIN_VIDEO_FPS}
+                max={MAX_VIDEO_FPS}
+                value={shaderSettings.videoFps}
+                onChange={(value) => updateNumber('videoFps', Math.round(value))}
+              />
+            </div>
+          ) : null}
           <div className="quick-sizes">
             <button type="button" className="wide-button" onClick={matchImageAspectRatio}>
-              Image ratio
+              {mediaKind === 'video' ? 'Video ratio' : 'Image ratio'}
             </button>
             <button type="button" onClick={() => setSettings((current) => ({ ...current, exportWidth: 1600, exportHeight: 1000 }))}>
               16:10
@@ -811,6 +1198,7 @@ function App() {
         className="export-stage"
         aria-hidden="true"
         data-export-signature={exportSignature}
+        data-export-frame-id={shaderFrameId}
         style={{
           width: `${shaderSettings.exportWidth}px`,
           height: `${shaderSettings.exportHeight}px`,
@@ -818,8 +1206,7 @@ function App() {
       >
         {imageUrl ? (
           <ImageDithering
-            key={exportSignature}
-            image={shaderImageUrl}
+            image={shaderImageSource}
             colorBack={shaderSettings.colorBack}
             colorFront={shaderSettings.colorFront}
             colorHighlight={shaderSettings.colorHighlight}
@@ -985,6 +1372,22 @@ async function waitForExportCanvas(container: HTMLDivElement, width: number, hei
   throw new Error('Timed out waiting for export canvas')
 }
 
+async function waitForExportFrame(container: HTMLDivElement, frameId: number, width: number, height: number) {
+  const deadline = performance.now() + 8000
+
+  while (performance.now() < deadline) {
+    if (container.dataset.exportFrameId === String(frameId)) {
+      const canvas = await waitForExportCanvas(container, width, height)
+      await nextFrame()
+      await nextFrame()
+      return canvas
+    }
+    await nextFrame()
+  }
+
+  throw new Error('Timed out waiting for export frame')
+}
+
 function getOutputSizeForImageRatio(imageSize: ImageSize, currentWidth: number, currentHeight: number) {
   const ratio = imageSize.width / imageSize.height
   if (!Number.isFinite(ratio) || ratio <= 0) {
@@ -1036,6 +1439,160 @@ function validateImageUrl(url: string) {
     image.onerror = () => reject(new Error('Image failed to load'))
     image.src = url
   })
+}
+
+async function validateVideoUrl(url: string, settings: DitherSettings): Promise<VideoMeta & { frame: HTMLImageElement }> {
+  const video = await createVideoElement(url)
+  await seekVideo(video, 0)
+  const frame = await createVideoFrameImage(video, settings)
+
+  return {
+    width: video.videoWidth,
+    height: video.videoHeight,
+    duration: video.duration,
+    frame,
+  }
+}
+
+function createVideoElement(url: string) {
+  return new Promise<HTMLVideoElement>((resolve, reject) => {
+    const video = document.createElement('video')
+    let settled = false
+
+    const cleanup = () => {
+      video.onloadedmetadata = null
+      video.onerror = null
+    }
+
+    const fail = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(new Error('Video failed to load'))
+    }
+
+    video.muted = true
+    video.playsInline = true
+    video.preload = 'auto'
+    video.onloadedmetadata = () => {
+      if (settled) return
+
+      const hasDimensions = video.videoWidth > 0 && video.videoHeight > 0
+      const hasDuration = Number.isFinite(video.duration) && video.duration > 0
+      if (!hasDimensions || !hasDuration) {
+        fail()
+        return
+      }
+
+      void waitForVideoData(video)
+        .then(() => {
+          if (settled) return
+          settled = true
+          cleanup()
+          resolve(video)
+        })
+        .catch(fail)
+    }
+    video.onerror = fail
+    video.src = url
+    video.load()
+  })
+}
+
+function waitForVideoData(video: HTMLVideoElement) {
+  if (video.readyState >= HAVE_CURRENT_DATA) return Promise.resolve()
+
+  return new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('Timed out waiting for video data'))
+    }, 8000)
+
+    const cleanup = () => {
+      window.clearTimeout(timeout)
+      video.removeEventListener('loadeddata', done)
+      video.removeEventListener('canplay', done)
+      video.removeEventListener('error', fail)
+    }
+    const done = () => {
+      cleanup()
+      resolve()
+    }
+    const fail = () => {
+      cleanup()
+      reject(new Error('Video data failed to load'))
+    }
+
+    video.addEventListener('loadeddata', done)
+    video.addEventListener('canplay', done)
+    video.addEventListener('error', fail)
+  })
+}
+
+function seekVideo(video: HTMLVideoElement, time: number) {
+  const nextTime = clampNumber(time, 0, video.duration || 0, 0)
+  if (Math.abs(video.currentTime - nextTime) < 0.004 && video.readyState >= HAVE_CURRENT_DATA) {
+    return Promise.resolve()
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('Timed out seeking video'))
+    }, 8000)
+
+    const cleanup = () => {
+      window.clearTimeout(timeout)
+      video.removeEventListener('seeked', done)
+      video.removeEventListener('error', fail)
+    }
+    const done = () => {
+      cleanup()
+      waitForVideoData(video).then(resolve, reject)
+    }
+    const fail = () => {
+      cleanup()
+      reject(new Error('Video seek failed'))
+    }
+
+    video.addEventListener('seeked', done)
+    video.addEventListener('error', fail)
+    video.currentTime = nextTime
+  })
+}
+
+async function createVideoFrameImage(video: HTMLVideoElement, settings: DitherSettings) {
+  const canvas = document.createElement('canvas')
+  canvas.width = video.videoWidth
+  canvas.height = video.videoHeight
+
+  const context = canvas.getContext('2d', { willReadFrequently: hasImageAdjustments(settings) })
+  if (!context) throw new Error('Canvas is not available')
+
+  context.drawImage(video, 0, 0, canvas.width, canvas.height)
+
+  if (hasImageAdjustments(settings)) {
+    const imageData = context.getImageData(0, 0, canvas.width, canvas.height)
+    applyImageAdjustments(imageData.data, settings)
+    context.putImageData(imageData, 0, 0)
+  }
+
+  return canvasToImage(canvas)
+}
+
+async function canvasToImage(canvas: HTMLCanvasElement) {
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+  if (!blob) throw new Error('Frame export failed')
+
+  const url = URL.createObjectURL(blob)
+  try {
+    const image = await loadImage(url)
+    image.width = canvas.width
+    image.height = canvas.height
+    return image
+  } finally {
+    URL.revokeObjectURL(url)
+  }
 }
 
 function hasImageAdjustments(settings: DitherSettings) {
@@ -1117,6 +1674,32 @@ function gammaCorrect(value: number, gammaInverse: number) {
 
 function nextFrame() {
   return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+}
+
+function downloadBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  document.body.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function formatDuration(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00'
+
+  const wholeSeconds = Math.floor(seconds)
+  const hours = Math.floor(wholeSeconds / 3600)
+  const minutes = Math.floor((wholeSeconds % 3600) / 60)
+  const remainingSeconds = wholeSeconds % 60
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+  }
+
+  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`
 }
 
 export default App
