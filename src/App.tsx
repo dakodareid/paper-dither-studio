@@ -74,12 +74,37 @@ type VideoExportFormat = {
 
 type ShaderImageSource = string | HTMLImageElement
 
+type MotionEase = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut'
+
 type NumericSettingKey = {
   [Key in keyof DitherSettings]: DitherSettings[Key] extends number ? Key : never
 }[keyof DitherSettings]
 
+type MotionParamMeta = {
+  key: MotionParamKey
+  label: string
+  min: number
+  max: number
+  step: number
+}
+
+type MotionParamSetting = {
+  enabled: boolean
+  start: number
+  end: number
+}
+
+type MotionSettings = {
+  enabled: boolean
+  startPercent: number
+  endPercent: number
+  easing: MotionEase
+  params: Record<MotionParamKey, MotionParamSetting>
+}
+
 const SETTINGS_KEY = 'paper-dither-studio.settings.v1'
 const PRESETS_KEY = 'paper-dither-studio.presets.v1'
+const MOTION_KEY = 'paper-dither-studio.motion.v1'
 const MIN_EXPORT_SIZE = 320
 const MAX_EXPORT_SIZE = 6000
 const MIN_VIDEO_FPS = 1
@@ -116,6 +141,27 @@ const defaultSettings: DitherSettings = {
   exportHeight: defaultImageSize.height,
   videoFps: 24,
 }
+
+const MOTION_PARAMETERS = [
+  { key: 'size', label: 'size', min: 0.5, max: 20, step: 0.1 },
+  { key: 'colorSteps', label: 'colorSteps', min: 1, max: 7, step: 1 },
+  { key: 'scale', label: 'scale', min: 0.01, max: 4, step: 0.01 },
+  { key: 'rotation', label: 'rotation', min: 0, max: 360, step: 1 },
+  { key: 'offsetX', label: 'offsetX', min: -1, max: 1, step: 0.01 },
+  { key: 'offsetY', label: 'offsetY', min: -1, max: 1, step: 0.01 },
+  { key: 'originX', label: 'originX', min: 0, max: 1, step: 0.01 },
+  { key: 'originY', label: 'originY', min: 0, max: 1, step: 0.01 },
+  { key: 'worldWidth', label: 'worldW', min: 0, max: 8000, step: 1 },
+  { key: 'worldHeight', label: 'worldH', min: 0, max: 8000, step: 1 },
+  { key: 'brightness', label: 'brightness', min: -100, max: 100, step: 1 },
+  { key: 'contrast', label: 'contrast', min: -100, max: 100, step: 1 },
+  { key: 'saturation', label: 'saturation', min: -100, max: 100, step: 1 },
+  { key: 'exposure', label: 'exposure', min: -2, max: 2, step: 0.05 },
+  { key: 'gamma', label: 'gamma', min: 0.25, max: 3, step: 0.01 },
+  { key: 'temperature', label: 'temperature', min: -100, max: 100, step: 1 },
+] as const
+
+type MotionParamKey = (typeof MOTION_PARAMETERS)[number]['key']
 
 const pinnedPresets = [
   { id: 'pinned-natural', name: 'Natural', settings: imageDitheringPresets[3]?.params },
@@ -156,6 +202,18 @@ function loadSavedPresets(): SavedPreset[] {
   }
 }
 
+function loadMotionSettings(): MotionSettings {
+  if (typeof window === 'undefined') return createDefaultMotionSettings()
+
+  try {
+    const raw = window.localStorage.getItem(MOTION_KEY)
+    if (!raw) return createDefaultMotionSettings()
+    return coerceMotionSettings(JSON.parse(raw))
+  } catch {
+    return createDefaultMotionSettings()
+  }
+}
+
 function coerceSettings(value: Partial<DitherSettings>): DitherSettings {
   const next = { ...defaultSettings, ...value }
 
@@ -189,6 +247,64 @@ function coerceSettings(value: Partial<DitherSettings>): DitherSettings {
   }
 }
 
+function createDefaultMotionSettings(): MotionSettings {
+  const params = {} as Record<MotionParamKey, MotionParamSetting>
+
+  MOTION_PARAMETERS.forEach(({ key }) => {
+    params[key] = {
+      enabled: false,
+      start: defaultSettings[key],
+      end: defaultSettings[key],
+    }
+  })
+
+  return {
+    enabled: false,
+    startPercent: 0,
+    endPercent: 100,
+    easing: 'linear',
+    params,
+  }
+}
+
+function coerceMotionSettings(value: unknown): MotionSettings {
+  const defaults = createDefaultMotionSettings()
+  const source = isPlainObject(value) ? value : {}
+  const sourceParams = isPlainObject(source.params) ? source.params : {}
+
+  const startPercent = Math.round(clampNumber(source.startPercent, 0, 99, defaults.startPercent))
+  let endPercent = Math.round(clampNumber(source.endPercent, 1, 100, defaults.endPercent))
+  if (endPercent <= startPercent) {
+    endPercent = Math.min(100, startPercent + 1)
+  }
+
+  MOTION_PARAMETERS.forEach((meta) => {
+    const rawParamSource = sourceParams[meta.key]
+    const rawParam: Record<string, unknown> = isPlainObject(rawParamSource) ? rawParamSource : {}
+    defaults.params[meta.key] = {
+      enabled: Boolean(rawParam.enabled),
+      start: clampNumber(rawParam.start, meta.min, meta.max, defaults.params[meta.key].start),
+      end: clampNumber(rawParam.end, meta.min, meta.max, defaults.params[meta.key].end),
+    }
+  })
+
+  return {
+    enabled: Boolean(source.enabled),
+    startPercent,
+    endPercent,
+    easing: isMotionEase(source.easing) ? source.easing : defaults.easing,
+    params: defaults.params,
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function isMotionEase(value: unknown): value is MotionEase {
+  return ['linear', 'easeIn', 'easeOut', 'easeInOut'].includes(String(value))
+}
+
 function clampNumber(value: unknown, min: number, max: number, fallback: number) {
   const numberValue = Number(value)
   if (!Number.isFinite(numberValue)) return fallback
@@ -208,6 +324,47 @@ function fileStem(name: string) {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 48)
+}
+
+function getAnimatedSettings(baseSettings: DitherSettings, motionSettings: MotionSettings, progress: number) {
+  if (!motionSettings.enabled) return baseSettings
+
+  const easedProgress = easeProgress(getMotionWindowProgress(progress, motionSettings), motionSettings.easing)
+  const nextSettings = { ...baseSettings }
+
+  MOTION_PARAMETERS.forEach(({ key }) => {
+    const param = motionSettings.params[key]
+    if (!param.enabled) return
+    nextSettings[key] = param.start + (param.end - param.start) * easedProgress
+  })
+
+  return coerceSettings(nextSettings)
+}
+
+function getMotionWindowProgress(progress: number, motionSettings: MotionSettings) {
+  const start = motionSettings.startPercent / 100
+  const end = motionSettings.endPercent / 100
+  const normalizedProgress = clampNumber(progress, 0, 1, 0)
+
+  if (end <= start) return normalizedProgress >= end ? 1 : 0
+  return clampNumber((normalizedProgress - start) / (end - start), 0, 1, 0)
+}
+
+function easeProgress(progress: number, easing: MotionEase) {
+  const t = clampNumber(progress, 0, 1, 0)
+
+  if (easing === 'easeIn') return t * t
+  if (easing === 'easeOut') return 1 - (1 - t) * (1 - t)
+  if (easing === 'easeInOut') {
+    return t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2
+  }
+
+  return t
+}
+
+function getVideoProgress(time: number, duration: number) {
+  if (!Number.isFinite(duration) || duration <= 0) return 0
+  return clampNumber(time / duration, 0, 1, 0)
 }
 
 function getSupportedVideoFormat(): VideoExportFormat | null {
@@ -230,6 +387,7 @@ function canEncodeWebmFrames() {
 
 function App() {
   const [settings, setSettings] = useState<DitherSettings>(loadSettings)
+  const [motionSettings, setMotionSettings] = useState<MotionSettings>(loadMotionSettings)
   const [savedPresets, setSavedPresets] = useState<SavedPreset[]>(loadSavedPresets)
   const [presetName, setPresetName] = useState('')
   const [selectedPresetId, setSelectedPresetId] = useState('')
@@ -248,6 +406,7 @@ function App() {
   const [status, setStatus] = useState('Settings saved in this browser')
   const [isExporting, setIsExporting] = useState(false)
   const [isVideoExporting, setIsVideoExporting] = useState(false)
+  const [exportRenderSettings, setExportRenderSettings] = useState<DitherSettings | null>(null)
   const [isImageLoading, setIsImageLoading] = useState(false)
   const [isImageAdjusting, setIsImageAdjusting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -262,8 +421,16 @@ function App() {
   const videoPreviewInFlightRef = useRef(false)
   const videoExportAbortRef = useRef(false)
   const shaderSettingsRef = useRef<DitherSettings>(coerceSettings(settings))
+  const motionSettingsRef = useRef<MotionSettings>(motionSettings)
+  const videoMetaRef = useRef<VideoMeta>(defaultVideoMeta)
 
   const shaderSettings = useMemo(() => coerceSettings(settings), [settings])
+  const videoProgress = mediaKind === 'video' ? getVideoProgress(videoTime, videoMeta.duration) : 0
+  const animatedSettings = useMemo(
+    () => getAnimatedSettings(shaderSettings, motionSettings, videoProgress),
+    [motionSettings, shaderSettings, videoProgress],
+  )
+  const renderSettings = exportRenderSettings ?? (mediaKind === 'video' ? animatedSettings : shaderSettings)
   const shaderImageSource: ShaderImageSource = adjustedImageUrl || imageUrl
   const videoExportFormat = useMemo(() => getSupportedVideoFormat(), [])
   const videoExportSupported = Boolean(videoExportFormat)
@@ -294,7 +461,9 @@ function App() {
 
       videoPreviewInFlightRef.current = true
       try {
-        const frame = await createVideoFrameImage(video, shaderSettingsRef.current)
+        const progress = getVideoProgress(video.currentTime, videoMetaRef.current.duration)
+        const frameSettings = getAnimatedSettings(shaderSettingsRef.current, motionSettingsRef.current, progress)
+        const frame = await createVideoFrameImage(video, frameSettings)
         setShaderImage(frame)
         setVideoTime(video.currentTime)
       } catch {
@@ -309,6 +478,14 @@ function App() {
   useEffect(() => {
     shaderSettingsRef.current = shaderSettings
   }, [shaderSettings])
+
+  useEffect(() => {
+    motionSettingsRef.current = motionSettings
+  }, [motionSettings])
+
+  useEffect(() => {
+    videoMetaRef.current = videoMeta
+  }, [videoMeta])
 
   useEffect(() => {
     return () => {
@@ -377,6 +554,10 @@ function App() {
   }, [shaderSettings])
 
   useEffect(() => {
+    window.localStorage.setItem(MOTION_KEY, JSON.stringify(motionSettings))
+  }, [motionSettings])
+
+  useEffect(() => {
     window.localStorage.setItem(PRESETS_KEY, JSON.stringify(savedPresets))
   }, [savedPresets])
 
@@ -421,12 +602,13 @@ function App() {
     isVideoExporting,
     isVideoPlaying,
     mediaKind,
-    shaderSettings.brightness,
-    shaderSettings.contrast,
-    shaderSettings.exposure,
-    shaderSettings.gamma,
-    shaderSettings.saturation,
-    shaderSettings.temperature,
+    motionSettings,
+    renderSettings.brightness,
+    renderSettings.contrast,
+    renderSettings.exposure,
+    renderSettings.gamma,
+    renderSettings.saturation,
+    renderSettings.temperature,
   ])
 
   function updateSetting<Key extends keyof DitherSettings>(key: Key, value: DitherSettings[Key]) {
@@ -435,6 +617,74 @@ function App() {
 
   function updateNumber(key: NumericSettingKey, value: number) {
     setSettings((current) => ({ ...current, [key]: value }))
+  }
+
+  function updateMotionSetting<Key extends keyof MotionSettings>(key: Key, value: MotionSettings[Key]) {
+    setMotionSettings((current) => coerceMotionSettings({ ...current, [key]: value }))
+  }
+
+  function updateMotionTiming(key: 'startPercent' | 'endPercent', value: number) {
+    setMotionSettings((current) => {
+      let startPercent = current.startPercent
+      let endPercent = current.endPercent
+
+      if (key === 'startPercent') {
+        startPercent = Math.round(clampNumber(value, 0, 99, current.startPercent))
+        if (startPercent >= endPercent) endPercent = Math.min(100, startPercent + 1)
+      } else {
+        endPercent = Math.round(clampNumber(value, 1, 100, current.endPercent))
+        if (endPercent <= startPercent) startPercent = Math.max(0, endPercent - 1)
+      }
+
+      return {
+        ...current,
+        startPercent,
+        endPercent,
+      }
+    })
+  }
+
+  function toggleMotionParam(key: MotionParamKey) {
+    setMotionSettings((current) => {
+      const currentParam = current.params[key]
+      const defaultValue = defaultSettings[key]
+      const shouldPrimeFromCurrent =
+        !currentParam.enabled &&
+        currentParam.start === defaultValue &&
+        currentParam.end === defaultValue
+
+      return {
+        ...current,
+        params: {
+          ...current.params,
+          [key]: {
+            ...currentParam,
+            enabled: !currentParam.enabled,
+            start: shouldPrimeFromCurrent ? shaderSettings[key] : currentParam.start,
+            end: shouldPrimeFromCurrent ? shaderSettings[key] : currentParam.end,
+          },
+        },
+      }
+    })
+  }
+
+  function updateMotionParamValue(key: MotionParamKey, field: 'start' | 'end', value: number) {
+    const meta = getMotionParamMeta(key)
+    setMotionSettings((current) => ({
+      ...current,
+      params: {
+        ...current.params,
+        [key]: {
+          ...current.params[key],
+          [field]: clampNumber(value, meta.min, meta.max, current.params[key][field]),
+        },
+      },
+    }))
+  }
+
+  function resetMotion() {
+    setMotionSettings(createDefaultMotionSettings())
+    setStatus('Motion reset')
   }
 
   function applyPreset(preset: Partial<DitherSettings>, name = 'Preset') {
@@ -722,6 +972,8 @@ function App() {
       const exportVideo = await createVideoElement(videoUrl)
       const fps = shaderSettings.videoFps
       const frameCount = Math.max(1, Math.ceil(exportVideo.duration * fps))
+      const baseSettings = shaderSettingsRef.current
+      const motion = motionSettingsRef.current
       const writer = new WebMWriter({
         frameRate: fps,
         quality: 0.95,
@@ -737,8 +989,11 @@ function App() {
         if (videoExportAbortRef.current) break
 
         const frameTime = Math.min(frameIndex / fps, Math.max(0, exportVideo.duration - 0.001))
+        const frameSettings = getAnimatedSettings(baseSettings, motion, getVideoProgress(frameTime, exportVideo.duration))
         await seekVideo(exportVideo, frameTime)
-        const frame = await createVideoFrameImage(exportVideo, shaderSettingsRef.current)
+        const frame = await createVideoFrameImage(exportVideo, frameSettings)
+        setExportRenderSettings(frameSettings)
+        setVideoTime(frameTime)
         const frameId = setShaderImage(frame)
         const exportCanvas = await waitForExportFrame(
           exportRef.current,
@@ -748,7 +1003,6 @@ function App() {
         )
 
         writer.addFrame(exportCanvas)
-        setVideoTime(frameTime)
         setStatus(`Exporting ${exportFormat.label} ${frameIndex + 1} / ${frameCount}`)
 
         if (exportCanvas !== canvas) {
@@ -773,6 +1027,7 @@ function App() {
     } catch {
       setStatus(videoExportAbortRef.current ? 'Video export cancelled' : 'Video export failed')
     } finally {
+      setExportRenderSettings(null)
       videoExportAbortRef.current = false
       setIsVideoExporting(false)
     }
@@ -784,9 +1039,9 @@ function App() {
       JSON.stringify({
         shaderFrameId,
         shaderImage: typeof shaderImageSource === 'string' ? shaderImageSource : 'video-frame',
-        ...shaderSettings,
+        ...renderSettings,
       }),
-    [shaderFrameId, shaderImageSource, shaderSettings],
+    [renderSettings, shaderFrameId, shaderImageSource],
   )
 
   return (
@@ -849,23 +1104,23 @@ function App() {
             {imageUrl ? (
               <ImageDithering
                 image={shaderImageSource}
-                colorBack={shaderSettings.colorBack}
-                colorFront={shaderSettings.colorFront}
-                colorHighlight={shaderSettings.colorHighlight}
-                originalColors={shaderSettings.originalColors}
-                inverted={shaderSettings.inverted}
-                type={shaderSettings.type}
-                size={shaderSettings.size}
-                colorSteps={shaderSettings.colorSteps}
-                scale={shaderSettings.scale}
-                rotation={shaderSettings.rotation}
-                offsetX={shaderSettings.offsetX}
-                offsetY={shaderSettings.offsetY}
-                originX={shaderSettings.originX}
-                originY={shaderSettings.originY}
-                fit={shaderSettings.fit}
-                worldWidth={shaderSettings.worldWidth}
-                worldHeight={shaderSettings.worldHeight}
+                colorBack={renderSettings.colorBack}
+                colorFront={renderSettings.colorFront}
+                colorHighlight={renderSettings.colorHighlight}
+                originalColors={renderSettings.originalColors}
+                inverted={renderSettings.inverted}
+                type={renderSettings.type}
+                size={renderSettings.size}
+                colorSteps={renderSettings.colorSteps}
+                scale={renderSettings.scale}
+                rotation={renderSettings.rotation}
+                offsetX={renderSettings.offsetX}
+                offsetY={renderSettings.offsetY}
+                originX={renderSettings.originX}
+                originY={renderSettings.originY}
+                fit={renderSettings.fit}
+                worldWidth={renderSettings.worldWidth}
+                worldHeight={renderSettings.worldHeight}
                 width="100%"
                 height="100%"
                 minPixelRatio={1}
@@ -1101,6 +1356,63 @@ function App() {
           </div>
         </section>
 
+        {mediaKind === 'video' ? (
+          <section className="control-section">
+            <div className="section-heading">
+              <h2>Motion</h2>
+              <button type="button" className="ghost-button" onClick={resetMotion}>
+                <RotateCcw size={15} />
+                Reset
+              </button>
+            </div>
+            <div className="toggle-row">
+              <ToggleControl
+                label="animate"
+                checked={motionSettings.enabled}
+                onChange={(value) => updateMotionSetting('enabled', value)}
+              />
+            </div>
+            <SelectControl
+              label="easing"
+              value={motionSettings.easing}
+              options={['linear', 'easeIn', 'easeOut', 'easeInOut']}
+              onChange={(value) => updateMotionSetting('easing', value as MotionEase)}
+            />
+            <div className="split-row">
+              <NumberControl
+                label="start%"
+                min={0}
+                max={99}
+                value={motionSettings.startPercent}
+                onChange={(value) => updateMotionTiming('startPercent', value)}
+              />
+              <NumberControl
+                label="end%"
+                min={1}
+                max={100}
+                value={motionSettings.endPercent}
+                onChange={(value) => updateMotionTiming('endPercent', value)}
+              />
+            </div>
+            <div className="motion-list">
+              <div className="motion-header">
+                <span>parameter</span>
+                <span>start</span>
+                <span>end</span>
+              </div>
+              {MOTION_PARAMETERS.map((meta) => (
+                <MotionParamControl
+                  key={meta.key}
+                  meta={meta}
+                  setting={motionSettings.params[meta.key]}
+                  onToggle={() => toggleMotionParam(meta.key)}
+                  onChange={(field, value) => updateMotionParamValue(meta.key, field, value)}
+                />
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         <section className="control-section">
           <div className="section-heading">
             <h2>Output</h2>
@@ -1207,23 +1519,23 @@ function App() {
         {imageUrl ? (
           <ImageDithering
             image={shaderImageSource}
-            colorBack={shaderSettings.colorBack}
-            colorFront={shaderSettings.colorFront}
-            colorHighlight={shaderSettings.colorHighlight}
-            originalColors={shaderSettings.originalColors}
-            inverted={shaderSettings.inverted}
-            type={shaderSettings.type}
-            size={shaderSettings.size}
-            colorSteps={shaderSettings.colorSteps}
-            scale={shaderSettings.scale}
-            rotation={shaderSettings.rotation}
-            offsetX={shaderSettings.offsetX}
-            offsetY={shaderSettings.offsetY}
-            originX={shaderSettings.originX}
-            originY={shaderSettings.originY}
-            fit={shaderSettings.fit}
-            worldWidth={shaderSettings.worldWidth}
-            worldHeight={shaderSettings.worldHeight}
+            colorBack={renderSettings.colorBack}
+            colorFront={renderSettings.colorFront}
+            colorHighlight={renderSettings.colorHighlight}
+            originalColors={renderSettings.originalColors}
+            inverted={renderSettings.inverted}
+            type={renderSettings.type}
+            size={renderSettings.size}
+            colorSteps={renderSettings.colorSteps}
+            scale={renderSettings.scale}
+            rotation={renderSettings.rotation}
+            offsetX={renderSettings.offsetX}
+            offsetY={renderSettings.offsetY}
+            originX={renderSettings.originX}
+            originY={renderSettings.originY}
+            fit={renderSettings.fit}
+            worldWidth={renderSettings.worldWidth}
+            worldHeight={renderSettings.worldHeight}
             width={shaderSettings.exportWidth}
             height={shaderSettings.exportHeight}
             minPixelRatio={1}
@@ -1354,6 +1666,56 @@ function NumberControl({
       />
     </label>
   )
+}
+
+function MotionParamControl({
+  meta,
+  setting,
+  onToggle,
+  onChange,
+}: {
+  meta: MotionParamMeta
+  setting: MotionParamSetting
+  onToggle: () => void
+  onChange: (field: 'start' | 'end', value: number) => void
+}) {
+  return (
+    <div className={`motion-param ${setting.enabled ? 'is-on' : ''}`}>
+      <button type="button" className="motion-toggle" onClick={onToggle} aria-pressed={setting.enabled}>
+        <span>{meta.label}</span>
+        <i>{setting.enabled ? <Check size={13} /> : null}</i>
+      </button>
+      <input
+        type="number"
+        min={meta.min}
+        max={meta.max}
+        step={meta.step}
+        value={formatMotionValue(setting.start, meta.step)}
+        disabled={!setting.enabled}
+        aria-label={`${meta.label} start`}
+        onChange={(event) => onChange('start', Number(event.currentTarget.value))}
+      />
+      <input
+        type="number"
+        min={meta.min}
+        max={meta.max}
+        step={meta.step}
+        value={formatMotionValue(setting.end, meta.step)}
+        disabled={!setting.enabled}
+        aria-label={`${meta.label} end`}
+        onChange={(event) => onChange('end', Number(event.currentTarget.value))}
+      />
+    </div>
+  )
+}
+
+function getMotionParamMeta(key: MotionParamKey): MotionParamMeta {
+  return MOTION_PARAMETERS.find((meta) => meta.key === key) ?? MOTION_PARAMETERS[0]
+}
+
+function formatMotionValue(value: number, step: number) {
+  const decimals = String(step).split('.')[1]?.length ?? 0
+  return Number(value.toFixed(decimals))
 }
 
 async function waitForExportCanvas(container: HTMLDivElement, width: number, height: number) {
